@@ -1,9 +1,8 @@
 import os
 import re
 import json
-import time
-import schedule
 import requests
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
@@ -18,18 +17,40 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def load_seen():
+    """
+    Charge l'historique des offres déjà vues.
+    Compatible avec l'ancien format seen_offers.json si c'était une simple liste.
+    """
     if not os.path.exists(SEEN_FILE):
-        return set()
+        return {
+            "ids": [],
+            "last_new_offer_at": None
+        }
+
     with open(SEEN_FILE, "r", encoding="utf-8") as file:
-        return set(json.load(file))
+        data = json.load(file)
+
+    if isinstance(data, list):
+        return {
+            "ids": data,
+            "last_new_offer_at": None
+        }
+
+    return data
 
 
-def save_seen(seen):
+def save_seen(data):
+    """
+    Sauvegarde l'historique.
+    """
     with open(SEEN_FILE, "w", encoding="utf-8") as file:
-        json.dump(list(seen), file, ensure_ascii=False, indent=2)
+        json.dump(data, file, ensure_ascii=False, indent=2)
 
 
 def send_telegram(message):
+    """
+    Envoie un message Telegram.
+    """
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     response = requests.post(
@@ -48,29 +69,50 @@ def send_telegram(message):
 
 
 def clean_text(text):
+    """
+    Nettoie les retours à la ligne excessifs.
+    """
     if not text:
         return ""
+
     text = text.strip()
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
 def shorten(text, max_length=800):
+    """
+    Raccourcit le texte pour éviter des messages Telegram trop longs.
+    """
     text = clean_text(text)
+
     if len(text) <= max_length:
         return text
+
     return text[:max_length].rsplit(" ", 1)[0] + "..."
 
 
 def extract_between(text, start, end):
+    """
+    Extrait un bloc de texte entre deux titres.
+    """
     pattern = re.escape(start) + r"(.*?)" + re.escape(end)
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+
     if match:
         return clean_text(match.group(1))
+
     return ""
 
 
 def clean_location(location):
+    """
+    Nettoie la localisation.
+    Exemple :
+    'BUENOS AIRES VIA septembre 2026 12 mois'
+    devient :
+    'BUENOS AIRES'
+    """
     if not location:
         return "Non trouvé"
 
@@ -84,6 +126,9 @@ def clean_location(location):
 
 
 def extract_offer_info(text):
+    """
+    Extrait les informations principales d'une page d'offre.
+    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     company = ""
@@ -108,6 +153,7 @@ def extract_offer_info(text):
                 job_title = lines[i - 2]
             if i >= 3:
                 company = lines[i - 3]
+
             break
 
     location = clean_location(headline)
@@ -130,6 +176,11 @@ def extract_offer_info(text):
 
 
 def fetch_offers():
+    """
+    Récupère les dernières offres visibles sur la page.
+    Ici, on garde volontairement les premières offres affichées,
+    donc les offres les plus récentes.
+    """
     print("Chargement des offres avec Playwright...")
 
     offers = []
@@ -189,6 +240,9 @@ def fetch_offers():
 
 
 def build_message(offer):
+    """
+    Construit le message Telegram pour une nouvelle offre.
+    """
     message = (
         "🚨 <b>Nouvelle offre VIE/VIA</b>\n\n"
         f"🏢 <b>Entreprise :</b> {offer.get('company') or 'Non trouvé'}\n"
@@ -208,10 +262,45 @@ def build_message(offer):
     return message
 
 
+def format_duration_since_last_new(last_new_offer_at):
+    """
+    Calcule depuis combien de temps aucune nouvelle offre n'a été trouvée.
+    """
+    if not last_new_offer_at:
+        return "aucune nouvelle offre détectée depuis le lancement du bot"
+
+    last_time = datetime.fromisoformat(last_new_offer_at)
+    now = datetime.now(timezone.utc)
+
+    delta = now - last_time
+    total_minutes = int(delta.total_seconds() // 60)
+
+    if total_minutes < 60:
+        return f"{total_minutes} minute(s)"
+
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+
+    if minutes == 0:
+        return f"{hours} heure(s)"
+
+    return f"{hours} heure(s) et {minutes} minute(s)"
+
+
 def check_offers():
+    """
+    Fonction principale :
+    - récupère les offres
+    - compare avec les offres déjà vues
+    - envoie les nouvelles
+    - si rien de nouveau, envoie un message de suivi
+    """
     print("\nVérification des nouvelles offres...")
 
-    seen = load_seen()
+    data = load_seen()
+    seen = set(data.get("ids", []))
+    last_new_offer_at = data.get("last_new_offer_at")
+
     offers = fetch_offers()
 
     print(f"Offres récupérées : {len(offers)}")
@@ -226,15 +315,25 @@ def check_offers():
             seen.add(offer["id"])
             new_count += 1
 
-    save_seen(seen)
-
-    if new_count == 0:
-        print("Aucune nouvelle offre.")
-    else:
+    if new_count > 0:
+        data["last_new_offer_at"] = datetime.now(timezone.utc).isoformat()
         print(f"{new_count} nouvelle(s) offre(s) envoyée(s).")
+
+    else:
+        duration = format_duration_since_last_new(last_new_offer_at)
+
+        send_telegram(
+            f"ℹ️ <b>Bot VIE actif</b>\n\n"
+            f"Pas de nouvelle offre depuis {duration}.\n"
+            f"Offres vérifiées : {len(offers)}"
+        )
+
+        print("Aucune nouvelle offre.")
+
+    data["ids"] = list(seen)
+    save_seen(data)
 
 
 if __name__ == "__main__":
     print("Bot lancé")
-    send_telegram("✅ Test GitHub Actions : le bot fonctionne.")
     check_offers()
