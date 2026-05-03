@@ -236,4 +236,5 @@ def check_offers():
 
 if __name__ == "__main__":
     print("Bot lancé")
+    send_telegram("✅ Test GitHub Actions : le bot fonctionne.")
     check_offers()
