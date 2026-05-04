@@ -2,6 +2,7 @@ import os
 import re
 import json
 import requests
+import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -17,10 +18,6 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def load_seen():
-    """
-    Charge l'historique des offres déjà vues.
-    Compatible avec l'ancien format seen_offers.json si c'était une simple liste.
-    """
     if not os.path.exists(SEEN_FILE):
         return {
             "ids": [],
@@ -36,21 +33,25 @@ def load_seen():
             "last_new_offer_at": None
         }
 
+    if "ids" not in data:
+        data["ids"] = []
+
+    if "last_new_offer_at" not in data:
+        data["last_new_offer_at"] = None
+
     return data
 
 
 def save_seen(data):
-    """
-    Sauvegarde l'historique.
-    """
     with open(SEEN_FILE, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
 
 
 def send_telegram(message):
-    """
-    Envoie un message Telegram.
-    """
+    if not TOKEN or not CHAT_ID:
+        print("Erreur : TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID manquant.")
+        return False
+
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     response = requests.post(
@@ -66,12 +67,12 @@ def send_telegram(message):
 
     if response.status_code != 200:
         print("Erreur Telegram :", response.text)
+        return False
+
+    return True
 
 
 def clean_text(text):
-    """
-    Nettoie les retours à la ligne excessifs.
-    """
     if not text:
         return ""
 
@@ -81,9 +82,6 @@ def clean_text(text):
 
 
 def shorten(text, max_length=800):
-    """
-    Raccourcit le texte pour éviter des messages Telegram trop longs.
-    """
     text = clean_text(text)
 
     if len(text) <= max_length:
@@ -93,9 +91,6 @@ def shorten(text, max_length=800):
 
 
 def extract_between(text, start, end):
-    """
-    Extrait un bloc de texte entre deux titres.
-    """
     pattern = re.escape(start) + r"(.*?)" + re.escape(end)
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
 
@@ -106,13 +101,6 @@ def extract_between(text, start, end):
 
 
 def clean_location(location):
-    """
-    Nettoie la localisation.
-    Exemple :
-    'BUENOS AIRES VIA septembre 2026 12 mois'
-    devient :
-    'BUENOS AIRES'
-    """
     if not location:
         return "Non trouvé"
 
@@ -126,9 +114,6 @@ def clean_location(location):
 
 
 def extract_offer_info(text):
-    """
-    Extrait les informations principales d'une page d'offre.
-    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     company = ""
@@ -176,23 +161,22 @@ def extract_offer_info(text):
 
 
 def fetch_offers():
-    """
-    Récupère les dernières offres visibles sur la page.
-    On clique plusieurs fois sur 'Voir plus d'offres' pour charger plus que les 6 premières.
-    """
     print("Chargement des offres avec Playwright...")
 
     offers = []
     urls_seen = set()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+
         page = browser.new_page()
 
-        page.goto(SEARCH_URL, wait_until="networkidle", timeout=60000)
+        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
-        # Charge plus d'offres que les 6 premières
         for i in range(5):
             button = page.locator("text=VOIR PLUS D'OFFRES")
 
@@ -209,6 +193,7 @@ def fetch_offers():
                 break
 
         links = page.locator("a").all()
+        print(f"Nombre de liens trouvés : {len(links)}")
 
         for link in links:
             href = link.get_attribute("href")
@@ -230,24 +215,29 @@ def fetch_offers():
 
             urls_seen.add(url)
 
-            detail_page = browser.new_page()
-            detail_page.goto(url, wait_until="networkidle", timeout=60000)
-            detail_page.wait_for_timeout(2500)
+            try:
+                detail_page = browser.new_page()
+                detail_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                detail_page.wait_for_timeout(2500)
 
-            text = detail_page.locator("body").inner_text()
-            info = extract_offer_info(text)
+                text = detail_page.locator("body").inner_text(timeout=30000)
+                info = extract_offer_info(text)
 
-            offers.append({
-                "id": offer_id,
-                "url": url,
-                "company": info["company"],
-                "title": info["job_title"],
-                "location": info["location"],
-                "publication_date": info["publication_date"],
-                "mission": info["mission"]
-            })
+                offers.append({
+                    "id": offer_id,
+                    "url": url,
+                    "company": info["company"],
+                    "title": info["job_title"],
+                    "location": info["location"],
+                    "publication_date": info["publication_date"],
+                    "mission": info["mission"]
+                })
 
-            detail_page.close()
+                detail_page.close()
+
+            except Exception as error:
+                print(f"Erreur sur l'offre {url} :", error)
+                continue
 
         browser.close()
 
@@ -255,9 +245,6 @@ def fetch_offers():
 
 
 def build_message(offer):
-    """
-    Construit le message Telegram pour une nouvelle offre.
-    """
     message = (
         "🚨 <b>Nouvelle offre VIE/VIA</b>\n\n"
         f"🏢 <b>Entreprise :</b> {offer.get('company') or 'Non trouvé'}\n"
@@ -278,9 +265,6 @@ def build_message(offer):
 
 
 def format_duration_since_last_new(last_new_offer_at):
-    """
-    Calcule depuis combien de temps aucune nouvelle offre n'a été trouvée.
-    """
     if not last_new_offer_at:
         return "aucune nouvelle offre détectée depuis le lancement du bot"
 
@@ -303,13 +287,6 @@ def format_duration_since_last_new(last_new_offer_at):
 
 
 def check_offers():
-    """
-    Fonction principale :
-    - récupère les offres
-    - compare avec les offres déjà vues
-    - envoie les nouvelles
-    - si rien de nouveau, envoie un message de suivi
-    """
     print("\nVérification des nouvelles offres...")
 
     data = load_seen()
@@ -351,4 +328,20 @@ def check_offers():
 
 if __name__ == "__main__":
     print("Bot lancé")
-    check_offers()
+
+    try:
+        check_offers()
+
+    except Exception as error:
+        error_message = traceback.format_exc()
+
+        print("Erreur pendant l'exécution du bot :")
+        print(error_message)
+
+        send_telegram(
+            "❌ <b>Erreur Bot VIE</b>\n\n"
+            "Le bot a planté pendant l'exécution.\n\n"
+            f"<pre>{str(error)[:1000]}</pre>"
+        )
+
+        raise
