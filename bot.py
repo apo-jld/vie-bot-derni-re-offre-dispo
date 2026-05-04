@@ -178,8 +178,7 @@ def extract_offer_info(text):
 def fetch_offers():
     """
     Récupère les dernières offres visibles sur la page.
-    Ici, on garde volontairement les premières offres affichées,
-    donc les offres les plus récentes.
+    On clique plusieurs fois sur 'Voir plus d'offres' pour charger plus que les 6 premières.
     """
     print("Chargement des offres avec Playwright...")
 
@@ -192,6 +191,22 @@ def fetch_offers():
 
         page.goto(SEARCH_URL, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(5000)
+
+        # Charge plus d'offres que les 6 premières
+        for i in range(5):
+            button = page.locator("text=VOIR PLUS D'OFFRES")
+
+            if button.count() == 0:
+                print("Bouton Voir plus introuvable.")
+                break
+
+            try:
+                print(f"Click Voir plus #{i + 1}")
+                button.first.click(timeout=7000)
+                page.wait_for_timeout(2500)
+            except Exception as error:
+                print("Impossible de cliquer sur Voir plus :", error)
+                break
 
         links = page.locator("a").all()
 
@@ -217,7 +232,7 @@ def fetch_offers():
 
             detail_page = browser.new_page()
             detail_page.goto(url, wait_until="networkidle", timeout=60000)
-            detail_page.wait_for_timeout(3000)
+            detail_page.wait_for_timeout(2500)
 
             text = detail_page.locator("body").inner_text()
             info = extract_offer_info(text)
