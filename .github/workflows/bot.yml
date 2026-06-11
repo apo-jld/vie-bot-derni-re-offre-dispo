@@ -1,7 +1,7 @@
 name: VIE Bot
 
-on:
-  schedule:
+#on:
+  #schedule:
     # Journée (toutes les 15 min)
    # - cron: "7,22,37,52 5-21 * * *"
 
